@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Send one VCC command to the Vesktop main process."""
+
+import os
+import socket
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in ("mute", "deafen"):
+        print("Usage: vesktopctl {mute|deafen}", file=sys.stderr)
+        return 2
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime or not os.path.isabs(runtime):
+        print("vesktopctl: XDG_RUNTIME_DIR is missing or invalid", file=sys.stderr)
+        return 1
+
+    address = os.path.join(runtime, "vesktopctl", "control.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(15)
+            client.connect(address)
+            client.sendall((sys.argv[1] + "\n").encode("ascii"))
+            response = bytearray()
+            while not response.endswith(b"\n") and len(response) < 1024:
+                chunk = client.recv(1024 - len(response))
+                if not chunk:
+                    break
+                response.extend(chunk)
+    except OSError as error:
+        print(f"vesktopctl: cannot contact Vesktop at {address}: {error}", file=sys.stderr)
+        return 1
+
+    if response == b"OK\n":
+        return 0
+    message = response.decode("utf-8", errors="replace").strip() or "no response"
+    print(f"vesktopctl: {message}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
