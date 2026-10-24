@@ -18,7 +18,7 @@ class BootstrapTests(unittest.TestCase):
         self.downloads.mkdir()
         self.archive = self.root / 'fixture.zip'
         self.script = self.root / 'install.sh'
-        self.script.write_text((SOURCE / 'install.sh').read_text().replace("REPOSITORY='OWNER/REPO'", "REPOSITORY='test/vesktopctl'"))
+        self.script.write_text((SOURCE / 'install.sh').read_text().replace("REPOSITORY='mag7ster/vesktopctl'", "REPOSITORY='test/vesktopctl'"))
         self.fakebin = self.root / 'bin'
         self.fakebin.mkdir()
         curl = self.fakebin / 'curl'
@@ -78,8 +78,8 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(list(self.downloads.iterdir()), [])
 
     def test_unconfigured_repository_fails_before_download(self):
-        result = subprocess.run(['sh', str(SOURCE / 'install.sh')], env=self.environment,
-                                capture_output=True, text=True, timeout=10)
+        self.script.write_text(self.script.read_text().replace("REPOSITORY='test/vesktopctl'", "REPOSITORY='OWNER/REPO'"))
+        result = self.invoke()
         self.assertEqual(result.returncode, 1)
         self.assertIn('OWNER/REPO', result.stderr)
         self.assertFalse((self.root / 'curl.json').exists())

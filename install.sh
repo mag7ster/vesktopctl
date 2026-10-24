@@ -1,8 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Set this to the published GitHub repository before distributing the installer.
-REPOSITORY='OWNER/REPO'
+REPOSITORY='mag7ster/vesktopctl'
 case "$REPOSITORY" in OWNER/*|*/REPO|'')
     printf '%s\n' 'vesktopctl: replace OWNER/REPO in install.sh with the GitHub repository first' >&2
     exit 1

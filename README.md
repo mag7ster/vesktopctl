@@ -11,10 +11,8 @@ Discord's controls. Commands toggle the current state. No background service or 
 Requires Python 3 and an initialized Vesktop installation. Start Vesktop at least once
 so it downloads Vencord. The curl installer also requires curl.
 
-Replace `OWNER/REPO` below and in `install.sh` with the published GitHub repository:
-
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mag7ster/vesktopctl/main/install.sh | sh
 ```
 
 Or install from a local checkout:
