@@ -79,6 +79,8 @@ UI, so it requires its controls to be available.
 
 ## Credits
 
+This project was developed with the assistance of OpenAI Codex, an AI coding agent.
+
 [vesktopCustomCommands](https://github.com/NitramO-YT/vesktopCustomCommands) was used as a
 reference for the JavaScript injection and button-click approach.
 
