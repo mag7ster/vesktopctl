@@ -8,7 +8,11 @@ const { BrowserWindow, app } = require("electron");
 
 // Flatpak changes XDG_RUNTIME_DIR to an app-private directory. The override in
 // README exposes this specific host runtime subdirectory at its host path.
-const directory = path.join("/run/user", String(process.getuid()), "vesktopctl");
+const runtime = process.env.FLATPAK_ID
+    ? path.join("/run/user", String(process.getuid()))
+    : process.env.XDG_RUNTIME_DIR;
+if (!runtime || !path.isAbsolute(runtime)) throw new Error("XDG_RUNTIME_DIR is missing or invalid");
+const directory = path.join(runtime, "vesktopctl");
 const address = path.join(directory, "control.sock");
 
 if (!globalThis.__vesktopctlServer) {

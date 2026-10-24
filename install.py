@@ -6,11 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shlex
 import stat
 import subprocess
 import sys
 import tempfile
+
+sys.dont_write_bytecode = True
 
 import vesktop_process
 
@@ -18,7 +19,7 @@ import vesktop_process
 BEGIN = "/* vesktopctl begin */"
 END = "/* vesktopctl end */"
 PATCH = (
-    f"{BEGIN}\n"
+    f"\n;{BEGIN}\n"
     "try { require(require('path').join(__dirname, 'vesktopctl', 'bridge.js')); } "
     "catch (error) { console.error('[vesktopctl] bridge load failed:', error); }\n"
     f"{END}\n"
@@ -55,13 +56,13 @@ class InstallState:
 
     def directory(self, path: Path, mode_changed: bool = False) -> None:
         key = str(path)
-        if key in self.data["directories"]:
-            return
         if path.is_symlink():
             raise ValueError(f"Refusing to manage symlinked directory: {path}")
         existed = path.exists()
         if existed and not path.is_dir():
             raise ValueError(f"Directory path occupied: {path}")
+        if key in self.data["directories"]:
+            return
         self.data["directories"][key] = {
             "existed": existed,
             "mode": stat.S_IMODE(path.stat().st_mode) if existed else None,
@@ -85,6 +86,8 @@ class InstallState:
             self.directory(path, mode_changed=mode_changed)
 
     def file(self, path: Path, role: str = "file") -> None:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError(f"Refusing non-regular managed file: {path}")
         key = str(path)
         if key in self.data["files"]:
             record = self.data["files"][key]
@@ -98,7 +101,19 @@ class InstallState:
                 record.update({"mode": stat.S_IMODE(metadata.st_mode), "atime_ns": metadata.st_atime_ns, "mtime_ns": metadata.st_mtime_ns})
                 self.save()
             elif role != "bundle" and path.is_file() and record.get("installed_sha") not in (None, file_hash(path)):
-                raise ValueError(f"Managed file changed since installation: {path}")
+                if role != "override":
+                    raise ValueError(f"Managed file changed since installation: {path}")
+                from uninstall import has_our_override_permission, remove_our_override_permission
+                original = (self.backups / record["backup"]).read_text() if record["existed"] else ""
+                current = path.read_text()
+                clean = current if has_our_override_permission(original) else remove_our_override_permission(current)
+                backup_name = record.get("backup", hashlib.sha256(key.encode()).hexdigest())
+                metadata = path.stat()
+                atomic_write(self.backups / backup_name, clean.encode(), stat.S_IMODE(metadata.st_mode))
+                record.update({"backup": backup_name, "existed": True,
+                               "mode": stat.S_IMODE(metadata.st_mode),
+                               "atime_ns": metadata.st_atime_ns, "mtime_ns": metadata.st_mtime_ns})
+                self.save()
             return
         if path.is_symlink():
             raise ValueError(f"Refusing to replace symlink: {path}")
@@ -137,6 +152,8 @@ class InstallState:
 def strip_patch(content: str) -> str:
     if content.count(BEGIN) != 1 or content.count(END) != 1:
         raise ValueError("Cannot remove an incomplete or duplicated vesktopctl patch")
+    if PATCH in content:
+        return content.replace(PATCH, "", 1)
     start = content.index(BEGIN)
     end = content.index(END, start) + len(END)
     if content[end:end + 1] == "\n":
@@ -219,7 +236,7 @@ def atomic_write(destination: Path, data: bytes, mode: int) -> None:
 def copy_if_changed(source: Path, destination: Path, mode: int, state: InstallState) -> None:
     state.file(destination)
     data = source.read_bytes()
-    if not destination.is_file() or destination.read_bytes() != data:
+    if not destination.is_file() or destination.read_bytes() != data or stat.S_IMODE(destination.stat().st_mode) != mode:
         atomic_write(destination, data, mode)
     state.installed(destination)
 
@@ -227,20 +244,12 @@ def copy_if_changed(source: Path, destination: Path, mode: int, state: InstallSt
 def patch_bundle(bundle: Path, bridge_source: Path, state: InstallState) -> None:
     if not bundle.is_file():
         raise ValueError(f"Vencord bundle not found: {bundle}")
-    content = bundle.read_text(encoding="utf-8")
-    if content.count(BEGIN) != content.count(END) or content.count(BEGIN) > 1:
-        raise ValueError("Bundle contains an incomplete or duplicated vesktopctl patch")
-
-    if BEGIN in content:
-        start = content.index(BEGIN)
-        end = content.index(END, start) + len(END)
-        patched = content[:start] + PATCH.rstrip("\n") + content[end:]
+    content = bundle.read_bytes().decode("utf-8")
+    if BEGIN in content or END in content:
+        clean = strip_patch(content)
     else:
-        anchor = "//# sourceURL="
-        if anchor in content:
-            patched = content.replace(anchor, PATCH + anchor, 1)
-        else:
-            patched = content.rstrip("\n") + "\n" + PATCH
+        clean = content
+    patched = clean + PATCH
 
     state.file(bundle, "bundle")
     bridge_dir = bundle.parent / "vesktopctl"
@@ -266,7 +275,7 @@ def setup_runtime(runtime: Path, state: InstallState) -> None:
     directory.chmod(0o700)
 
 
-def install_tools(source_dir: Path, bundle: Path, kind: str, home: Path, explicit_bundle: bool, state: InstallState) -> None:
+def install_tools(source_dir: Path, home: Path, state: InstallState) -> None:
     bin_dir = home / ".local/bin"
     data_dir = home / ".local/share/vesktopctl"
     state.directory_tree(bin_dir, create=True)
@@ -276,24 +285,46 @@ def install_tools(source_dir: Path, bundle: Path, kind: str, home: Path, explici
     copy_if_changed(source_dir / "uninstall.py", data_dir / "uninstall.py", 0o755, state)
     copy_if_changed(source_dir / "vesktop_process.py", data_dir / "vesktop_process.py", 0o644, state)
     copy_if_changed(source_dir / "bridge.js", data_dir / "bridge.js", 0o644, state)
+    copy_if_changed(source_dir / "LICENSE", data_dir / "LICENSE", 0o644, state)
     print(f"CLI: {bin_dir / 'vesktopctl'}")
 
-    if kind == "Flatpak":
-        launcher = bin_dir / "vesktopctl-vesktop"
-        selection = f"--bundle {shlex.quote(str(bundle))}" if explicit_bundle else "--target flatpak"
-        command = (
-            "#!/bin/sh\n"
-            f"if ! python3 {shlex.quote(str(data_dir / 'install.py'))} --patch-only "
-            f"{selection}; then\n"
-            "  printf '%s\\n' 'vesktopctl: patch unavailable; starting Vesktop so it can initialize Vencord' >&2\n"
-            "fi\n"
-            f"exec flatpak run {APP_ID} \"$@\"\n"
-        )
-        state.file(launcher)
-        if not launcher.is_file() or launcher.read_text() != command:
-            atomic_write(launcher, command.encode(), 0o755)
-        state.installed(launcher)
-        print(f"Launch through {launcher} to reapply the patch after Vencord updates.")
+    # Restore any file that existed before the old launcher was installed.
+    launcher = bin_dir / "vesktopctl-vesktop"
+    record = state.data["files"].get(str(launcher))
+    if record:
+        from uninstall import restore_file
+        restore_file(launcher, record, state.backups)
+        del state.data["files"][str(launcher)]
+        state.save()
+        if record.get("backup"):
+            (state.backups / record["backup"]).unlink(missing_ok=True)
+
+
+def saved_selections(data: dict, home: Path, xdg_config: Path) -> dict:
+    """Infer missing selections from manifests written by earlier versions."""
+    selections = data.setdefault("selections", {})
+    standard = {
+        home / ".var/app" / APP_ID / "config/vesktop" / FILES_DIR / BUNDLE_NAME,
+        xdg_config / "vesktop" / FILES_DIR / BUNDLE_NAME,
+        home / ".var/app" / APP_ID / "config/Vencord/dist" / BUNDLE_NAME,
+        xdg_config / "Vencord/dist" / BUNDLE_NAME,
+    }
+    candidates = {}
+    for name, record in data["files"].items():
+        if record.get("role") != "bundle":
+            continue
+        bundle = Path(name)
+        kind = "flatpak" if home / ".var/app" / APP_ID in bundle.parents else "native"
+        candidates.setdefault(kind, []).append(bundle)
+    # A custom Flatpak bundle can live outside ~/.var/app.
+    targets = data.get("targets", [])
+    if len(targets) == 1:
+        candidates = {targets[0].lower(): [Path(name) for name, record in data["files"].items()
+                                          if record.get("role") == "bundle"]}
+    for kind, bundles in candidates.items():
+        if kind not in selections and len(bundles) == 1:
+            selections[kind] = {"bundle": None if bundles[0] in standard else str(bundles[0])}
+    return selections
 
 
 def flatpak_override_path(home: Path) -> Path:
@@ -301,17 +332,38 @@ def flatpak_override_path(home: Path) -> Path:
     return data_home / "flatpak/overrides" / APP_ID
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, help="Vencord bundle file or its directory")
-    parser.add_argument("--target", choices=("flatpak", "native"), help="select an installation when several exist")
-    parser.add_argument("--patch-only", action="store_true", help="reapply only the bundle patch before launch")
-    parser.add_argument("--no-restart", action="store_true", help="leave a running Vesktop open (restart it manually)")
-    args = parser.parse_args()
+    parser.add_argument("--target", choices=("flatpak", "native"), help="select a Vesktop installation")
+    parser.add_argument("--patch-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-restart", action="store_true", help="require Vesktop to be closed; do not restart it")
+    args = parser.parse_args(argv)
     home = Path.home()
     xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     source_dir = Path(__file__).resolve().parent
+    stopped = None
+    failure = None
     try:
+        manifest = home / STATE_DIR_NAME / "manifest.json"
+        previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else None
+        if args.patch_only and previous is None:
+            raise ValueError("No vesktopctl installation found; run the installer first")
+        if previous:
+            if previous.get("version") != 1:
+                raise ValueError(f"Unsupported install state: {manifest}")
+            if any(record.get("restored") for record in previous["files"].values()):
+                raise ValueError("Previous removal is incomplete; retry vesktopctl uninstall first")
+            selections = saved_selections(previous, home, xdg_config)
+            if args.target is None and not args.bundle:
+                if len(selections) > 1:
+                    raise ValueError("Multiple installations recorded; use --target flatpak|native")
+                if len(selections) == 1:
+                    args.target = next(iter(selections))
+            selection = selections.get(args.target)
+            if selection and not args.bundle and selection.get("bundle"):
+                args.bundle = Path(selection["bundle"])
+
         if args.bundle:
             bundle = args.bundle.expanduser().absolute()
             if bundle.is_dir():
@@ -328,37 +380,54 @@ def main() -> int:
         else:
             bundle, kind = discover_bundle(home, xdg_config, args.target)
 
+        if not bundle.is_file() or bundle.is_symlink():
+            raise ValueError(f"Vencord bundle is missing or symlinked: {bundle}")
+        content = bundle.read_bytes().decode("utf-8")
+        if BEGIN in content or END in content:
+            strip_patch(content)  # Reject damaged markers before changing anything.
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if not runtime or not Path(runtime).is_absolute():
+            raise ValueError("XDG_RUNTIME_DIR is missing or invalid; run in a desktop session")
         print(f"Vesktop {kind}: {bundle}")
-        running = vesktop_process.running(kind) if not args.patch_only and not args.no_restart else {}
+        running = vesktop_process.running(kind)
+        if args.no_restart and running:
+            raise ValueError("Close Vesktop before using --no-restart")
+        if running:
+            stopped = running
+            vesktop_process.stop(running)
         state = InstallState(home)
         state.target(kind)
-
-        if not args.patch_only:
-            runtime = os.environ.get("XDG_RUNTIME_DIR")
-            if not runtime:
-                raise ValueError("XDG_RUNTIME_DIR is unset; run from a logged-in desktop session")
-            setup_runtime(Path(runtime), state)
-            if kind == "Flatpak":
-                override = flatpak_override_path(home)
-                state.directory_tree(override.parent)
-                state.file(override, "override")
-                subprocess.run(
-                    ["flatpak", "override", "--user", "--filesystem=xdg-run/vesktopctl:create", APP_ID],
-                    check=True,
-                )
-                state.installed(override)
+        saved_selections(state.data, home, xdg_config)[kind.lower()] = {
+            "bundle": str(bundle) if args.bundle is not None else None
+        }
+        state.save()
+        setup_runtime(Path(runtime), state)
+        if kind == "Flatpak":
+            override = flatpak_override_path(home)
+            state.directory_tree(override.parent)
+            state.file(override, "override")
+            subprocess.run(
+                ["flatpak", "override", "--user", "--filesystem=xdg-run/vesktopctl:create", APP_ID],
+                check=True,
+            )
+            state.installed(override)
         patch_bundle(bundle, source_dir / "bridge.js", state)
         if not args.patch_only:
-            install_tools(source_dir, bundle, kind, home, args.bundle is not None, state)
-            if running:
-                vesktop_process.stop(running)
-                vesktop_process.start(running)
-            else:
-                print("Start or restart Vesktop to load the bridge.")
-        return 0
+            install_tools(source_dir, home, state)
+        if not running:
+            print("Start Vesktop to load the patch.")
     except (OSError, UnicodeError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
-        print(f"install.py: {error}", file=sys.stderr)
+        failure = error
+    finally:
+        if stopped:
+            try:
+                vesktop_process.start(stopped)
+            except (OSError, RuntimeError) as error:
+                failure = error if failure is None else ValueError(f"{failure}; Vesktop restart failed: {error}")
+    if failure:
+        print(f"vesktopctl: {failure}", file=sys.stderr)
         return 1
+    return 0
 
 
 if __name__ == "__main__":

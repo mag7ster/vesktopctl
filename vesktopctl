@@ -1,15 +1,43 @@
 #!/usr/bin/env python3
-"""Send one VCC command to the Vesktop main process."""
+"""Control Vesktop and manage its command patch."""
 
+import argparse
 import os
+from pathlib import Path
 import socket
 import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in ("mute", "deafen"):
-        print("Usage: vesktopctl {mute|deafen}", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("mute", help="toggle microphone mute")
+    commands.add_parser("deafen", help="toggle deafen")
+    patch = commands.add_parser("patch", help="apply or restore the Vesktop patch")
+    patch.add_argument("--target", choices=("flatpak", "native"))
+    patch.add_argument("--bundle", help="Vencord bundle file or its directory")
+    patch.add_argument("--no-restart", action="store_true", help="require Vesktop to be closed")
+    remove = commands.add_parser("uninstall", help="remove the patch and vesktopctl")
+    remove.add_argument("--patch-only", action="store_true", help="keep CLI and tools for later patching")
+    remove.add_argument("--no-restart", action="store_true", help="require Vesktop to be closed")
+    args = parser.parse_args()
+    if args.command in ("patch", "uninstall"):
+        helper = "install.py" if args.command == "patch" else "uninstall.py"
+        source = Path(__file__).resolve().parent
+        if not (source / helper).is_file():
+            source = Path.home() / ".local/share/vesktopctl"
+        if not (source / helper).is_file():
+            print("vesktopctl: installed tools not found; run the installer again", file=sys.stderr)
+            return 1
+        arguments = [sys.executable, str(source / helper)]
+        if args.command == "patch":
+            arguments.append("--patch-only")
+        arguments.extend(sys.argv[2:])
+        try:
+            os.execv(sys.executable, arguments)
+        except OSError as error:
+            print(f"vesktopctl: cannot start tools: {error}", file=sys.stderr)
+            return 1
 
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if not runtime or not os.path.isabs(runtime):
@@ -21,7 +49,7 @@ def main() -> int:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(15)
             client.connect(address)
-            client.sendall((sys.argv[1] + "\n").encode("ascii"))
+            client.sendall((args.command + "\n").encode("ascii"))
             response = bytearray()
             while not response.endswith(b"\n") and len(response) < 1024:
                 chunk = client.recv(1024 - len(response))
