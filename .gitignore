@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.cache/
+.idea/
+.vscode/
+.agents/
+.codex/
+.aws/
+*.tmp
+.DS_Store
