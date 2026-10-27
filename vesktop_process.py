@@ -13,7 +13,23 @@ APP_ID = "dev.vencord.Vesktop"
 
 def flatpak_instances() -> list[str]:
     output = subprocess.run(["flatpak", "ps", "--json"], check=True, capture_output=True, text=True)
-    return [item["instance"] for item in json.loads(output.stdout) if item.get("application") == APP_ID]
+    # Flatpak prints nothing, rather than [], when no sandboxes remain.
+    if not output.stdout.strip():
+        return []
+    try:
+        instances = json.loads(output.stdout)
+    except ValueError as error:
+        raise RuntimeError("flatpak ps --json returned invalid JSON") from error
+    if not isinstance(instances, list) or any(not isinstance(item, dict) for item in instances):
+        raise RuntimeError("flatpak ps --json returned an unexpected process list")
+    result = []
+    for item in instances:
+        if item.get("application") == APP_ID:
+            instance = item.get("instance")
+            if not isinstance(instance, str) or not instance:
+                raise RuntimeError("flatpak ps --json returned a Vesktop process without an instance ID")
+            result.append(instance)
+    return result
 
 
 def native_processes() -> dict[int, list[str]]:
